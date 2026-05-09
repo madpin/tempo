@@ -1,0 +1,43 @@
+---
+description: Keep code in sync with PRD, TECHNICAL_DECISIONS, and IMPLEMENTATION_PLAN
+globs: PRD.md,TECHNICAL_DECISIONS.md,IMPLEMENTATION_PLAN.md
+alwaysApply: false
+---
+
+# Spec consistency
+
+The three planning documents are the source of truth for Tempo. They were written deliberately and the team relies on them. Silent drift between code and docs is the failure mode this rule prevents. Apply this rule when editing any of the planning docs — or when a code change touches behavior described in them.
+
+## Required reading
+
+- `PRD.md` (in full).
+- `TECHNICAL_DECISIONS.md` (in full).
+- `IMPLEMENTATION_PLAN.md` (in full).
+
+`tempo-project.mdc` distills the invariants downstream of these docs but is not a substitute.
+
+## What to check
+
+For the change in front of you, walk through these questions and answer each:
+
+1. **Which PRD features does this change implement, modify, or contradict?** Cite section numbers (e.g., F-4.3, F-5.10). If the change implements a feature, confirm the implementation matches the feature's description. If it modifies behavior described in the PRD, the PRD must be updated in the same PR.
+2. **Does the change respect the resolved design decisions in PRD §8?** Five decisions are explicitly resolved (atomic granularity is variable; insufficient-time alerts not silent rebalancing; placement-pattern surfacing not silent learning; on-login digest by default; past-deadline prompt with configurable default). Re-opening any of them must be flagged.
+3. **Does the change deviate from `TECHNICAL_DECISIONS.md`?** Particularly: stack choices in §2, environment split in §4, local-dev setup in §5 (Postgres on 5433), repo structure in §6. Picking a different library, port, or repo layout requires updating the doc in the same PR or adding an ADR.
+4. **Does the change fit the current milestone?** Identify which of M0–M5 (`IMPLEMENTATION_PLAN.md` §3–§8) the change belongs in. If it implements work explicitly *deferred* from the current milestone, ask whether scope is being expanded deliberately or by accident.
+5. **Does the change touch a decision point?** §10 of the implementation plan lists explicit decision points (engine algorithm strategy before M2, prompt versioning before M3, two-way sync default before M4, prod hosting before M5). Resolving one of these means the doc records the decision.
+6. **Are out-of-scope items being silently introduced?** PRD §6 and `IMPLEMENTATION_PLAN.md` §11 enumerate explicit non-goals — mobile-only code, multi-user collaboration, habit-tracking UI, billing, compliance scaffolding. Flag them.
+7. **Does the change require a rule update?** If a new convention, command, or invariant is introduced, propose the precise edit to `.cursor/rules/tempo-project.mdc`.
+
+## What "deviation" looks like
+
+Deviations are not always bugs — sometimes the docs were wrong, or the team has learned something new. The point is to surface the deviation explicitly:
+
+- Code uses Prisma instead of Drizzle → tech doc says Drizzle. Either the code is wrong, or the tech doc needs an ADR explaining the swap.
+- Code adds a habit-streaks feature → PRD §6 lists "habit tracking" as out of scope. Either the code is out of scope, or the PRD needs a scope-change note.
+- Code lets the AI auto-apply edits without user review → PRD F-6.8 and `tempo-project.mdc` invariant 4 require reviewable diffs. Hard violation; block.
+- Code introduces an engine call to an external API → engine purity is required. Either move the call out of the engine, or reopen the invariant (a much bigger conversation).
+- Code adds shared-anchor logic → `IMPLEMENTATION_PLAN.md` lists shared anchors as post-launch. Either roll back, or update the plan to reflect a scope change.
+
+## Output
+
+For each PRD/TECHNICAL_DECISIONS/IMPLEMENTATION_PLAN section the change touches, cite it and note alignment status: Aligned / Deviates — doc update needed / Deviates — code update needed / Hard violation. Cite section numbers exactly. Do not propose doc edits without quoting the relevant existing text. The goal is alignment, not paperwork.

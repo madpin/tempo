@@ -1,0 +1,44 @@
+---
+description: Invariants for Tempo's AI authoring layer (prompts, tools, providers, evals)
+globs: apps/web/src/ai/**/*
+alwaysApply: false
+---
+
+# AI surface invariants
+
+The AI surface sits between the user's natural-language intent and the engine that places work. Sloppy prompts, missing eval coverage, or AI tools that bypass the engine simulator can silently produce wrong plans. When changing anything under `apps/web/src/ai/`, every item below must hold.
+
+## Required reading
+
+- `PRD.md` §4.6 (AI-Driven Authoring) — every feature listed there constrains the AI surface.
+- `TECHNICAL_DECISIONS.md` §3.4 (Why Anthropic Claude).
+- `IMPLEMENTATION_PLAN.md` §6 (M3 — AI Authoring), including deferred items and risks.
+
+## Invariants
+
+1. **Prompts are code.** Every prompt lives in a TypeScript module under `apps/web/src/ai/prompts/` and is imported, not loaded from a database, file system, or remote source at runtime.
+2. **Model version pinned.** The model identifier is an explicit string constant (e.g., `claude-sonnet-4-6`, `claude-opus-4-7`), not a moving alias like `claude-3-sonnet-latest`. The pinned version is recent (within the last two model families) and documented.
+3. **No direct writes from AI to plans.** AI tools produce *proposals* (`propose_anchored_event`, `propose_recurring_task`, `propose_fluid_task`) that flow through the diff API and a user-approval step. There is no code path where an AI tool call mutates `plans`, `anchors`, `tasks`, or `recurrence_rules` directly.
+4. **AI plan-write paths simulate first.** Any tool that proposes changes to a plan calls `simulate_placement` (or the engine's dry-run entry point) and includes the simulator's verdict in the proposed diff. The user sees the predicted placement before approving.
+5. **Diff format intact.** The diff returned to the UI is the structured `{ added, removed, moved }` shape. New AI features extend this schema rather than introducing a parallel one.
+6. **Eval coverage.** Any prompt change ships with new or updated cases in the eval harness (`apps/web/src/ai/__evals__/`). Eval cases pin both the model version and the expected structured output. Pure-text prompt edits without eval updates are a smell.
+7. **Cost and latency telemetry.** Each AI call records cost (input + output tokens) and latency to PostHog or the equivalent telemetry sink. New AI surfaces have their own event name so we can break costs down per feature.
+8. **Feature flag gate.** New AI surfaces are gated behind a PostHog flag (default off in dev/qa for non-opted users; default off in prod). The gate is checked server-side, not just in the UI.
+9. **Prompt-injection safety.** User-supplied text is never concatenated into the system prompt or any prompt position that grants tool authority. User text always lives in user-role messages, isolated from instruction surfaces.
+10. **`AIProvider` abstraction respected.** New code goes through the `AIProvider` interface, not directly against the Anthropic SDK. If the abstraction is missing a capability, add it to the interface — do not bypass.
+11. **Rate limits and per-user cost caps.** Any new AI surface respects existing rate-limit and per-user budget plumbing. Surfaces that bypass the cap (e.g., direct backend invocation from an Inngest job for an end user) are flagged.
+12. **Reasoning is reviewable.** When the AI produces free-form output the user will see (Explain-the-Plan, postmortems), the prompt keeps claims grounded in the engine's actual placement reasons rather than hallucinating new justifications.
+
+## Smells to flag
+
+- Prompts longer than ~200 lines without sectioning — they are hard to evaluate and tune.
+- Missing or terse system prompts — Tempo's AI behaviors are specific and need explicit framing.
+- Vague tool descriptions ("propose tasks") — they cause poor tool selection.
+- Lack of structured output (Zod schema or JSON Schema) on tools that return data the app consumes.
+- Hard-coded API keys or model identifiers outside `apps/web/src/env.ts`.
+- "Just one more chat turn" patterns — recursive AI calls without a turn cap.
+- Treating user input from the chat as if it were trusted (e.g., embedding it in a tool's description).
+
+## Self-review before completing a change
+
+Walk the twelve invariants and confirm PASS / FAIL / N/A with file:line evidence. Confirm telemetry and feature-flag wiring. Cite paths exactly. Do not speculate about prompts you have not read.

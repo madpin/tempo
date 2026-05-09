@@ -1,0 +1,40 @@
+---
+description: Invariants for Drizzle schema and migrations
+globs: apps/web/src/db/**/*
+alwaysApply: false
+---
+
+# Schema invariants
+
+Tempo's data model encodes the layer-precedence invariant and the discriminator+JSONB task pattern. The engine, the AI surface, and direct SQL queries all touch this data, so the storage layer must enforce what application code can't. When changing anything under `apps/web/src/db/`, every item below must hold.
+
+## Required reading
+
+- `TECHNICAL_DECISIONS.md` §2 (Stack), §3.3 (Why Drizzle).
+- `PRD.md` §3 (Core Concepts) — the three-layer model is the schema's spine.
+- `IMPLEMENTATION_PLAN.md` §4 (M1 — Walking Skeleton) for the canonical entity list: `users`, `plans`, `anchors`, `availability_windows`, `availability_overrides`, `tasks` (with discriminator), `recurrence_rules`, `task_dependencies`, `task_completions`.
+
+## Invariants
+
+1. **Migrations are forward-only.** Add a new migration file rather than editing an existing one. Destructive operations (`DROP TABLE`, `DROP COLUMN`, type-narrowing changes) appear only with an explicit comment justifying them and a rollback note in the PR description.
+2. **Foreign keys.** All references between entities are FKs with appropriate `ON DELETE` behavior (typically `CASCADE` for child rows of a plan, `RESTRICT` where data must be preserved).
+3. **Layer precedence in the data layer.** The `tasks.kind` discriminator is constrained to `anchored | recurring | fluid`. Any column that would let a fluid task occupy an anchored slot (e.g., a `pinned_at` timestamp on a fluid task that ignores conflicts) requires a check constraint or a service-layer comment explaining why DB enforcement isn't possible.
+4. **Discriminator + JSONB pattern preserved.** New task-shape variations go into the `tasks` table's `kind`-specific JSONB column. A parallel table per kind is a smell — propose a JSONB shape instead.
+5. **Indices match queries.** Plan view queries are predictable: "open fluid tasks for plan X within window Y," "anchored events for plan X intersecting range R," "recurring rules for plan X expanded over range R." New columns used in those queries get indices; new tables that participate get composite indices on `(plan_id, ...)`.
+6. **Idempotence of the seed script.** When the schema shape changes, `apps/web/src/db/seed.ts` is updated and remains idempotent (re-running does not duplicate rows).
+7. **Zod schemas stay aligned.** When a column is added/changed/removed, the Zod input schemas under `apps/web/src/server/` are updated in the same change. Type drift between DB and validation is a defect.
+8. **No PII leak into JSONB without consideration.** New JSONB shapes are reviewed for whether they carry user-identifiable data that should be a typed column instead (for indexing, deletion, or compliance).
+9. **Default values are explicit.** New non-nullable columns either have a default or a backfill plan in the migration. Adding a `NOT NULL` column without a default to a table with existing rows is a defect.
+10. **Migration runs cleanly against a fresh DB.** When possible, run `drizzle-kit migrate` against the local container and confirm. Otherwise, walk through the SQL and flag obvious issues.
+
+## Common smells to flag
+
+- Tables that grow unbounded without partitioning (`task_completions`, `replan_log`).
+- Missing timestamps (`created_at`, `updated_at`) on entities the user can edit.
+- Booleans where an enum would carry better intent.
+- `text` columns where `varchar` with a length cap belongs (or vice versa).
+- Missing unique constraints on natural keys (e.g., `(user_id, calendar_provider, external_id)` for synced calendar events).
+
+## Self-review before completing a change
+
+Walk the ten invariants and confirm PASS / FAIL / N/A with file:line evidence. Cite migration filenames and line numbers. Do not speculate about query patterns you have not seen.

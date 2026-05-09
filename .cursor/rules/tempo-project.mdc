@@ -1,0 +1,141 @@
+---
+description: Core project rules and invariants for Tempo
+alwaysApply: true
+---
+
+# Tempo — Project Rules
+
+Tempo is a **constraint-based temporal scheduling engine**. It treats time as a finite resource and *solves* the user's schedule by balancing rigid life constraints, recurring obligations, and flexible project goals.
+
+## The three task layers
+
+| Layer | Name | Movement | Examples |
+|-------|------|----------|----------|
+| A | **Anchored Events** ("Boulders") | Immovable | Appointments, hard deadlines |
+| B | **Recurring Cadence** ("Pulse") | Predictable | Weekly labs, bi-weekly reviews |
+| C | **Fluid Content** ("Water") | Adaptive | Read 30 chapters, packing list |
+
+**Cardinal invariant: higher layers always displace lower layers, never the reverse.**
+
+## Source-of-truth docs
+
+Before any non-trivial change, the relevant doc is the source of truth:
+
+- **`PRD.md`** — product features, three-layer model, resolved design decisions, in/out of scope.
+- **`TECHNICAL_DECISIONS.md`** — stack, environments (dev/qa/prod), local Postgres setup, repo structure.
+- **`IMPLEMENTATION_PLAN.md`** — milestones (M0–M5), what ships when, decision points, deferred work.
+
+If a code change conflicts with these docs, **update the docs in the same PR** or add a short ADR explaining the deviation. Silent drift is the failure mode we are guarding against.
+
+## Critical invariants (non-negotiable)
+
+1. **Layer precedence: Anchored > Recurring > Fluid.** Fluid placements never overwrite anchored or recurring slots. Enforce in the engine, the data layer (FK / check constraints), and the API.
+2. **Engine purity.** Code under `apps/web/src/engine/` is pure: no `fs`, no `process`, no network, no direct `Date.now()` (inject a clock), no DB access. The engine takes typed inputs and returns typed outputs.
+3. **Non-destructive replan.** Any reflow preserves user-marked progress, completion state, notes, and user-pinned slots. Replans add and move *unpinned* fluid blocks; they do not delete user state.
+4. **AI changes are always reviewable.** No LLM call writes directly to a user's plan. The AI proposes a structured diff; the user approves, edits, or rejects before commit. AI plan-write paths go through the engine's simulator first.
+5. **Insufficient-time alerts, not silent best-effort.** When constraints make the plan infeasible, the engine returns a structured shortfall and the UI raises it. It does not quietly drop or compress to fit.
+6. **Validate at every boundary.** Every server action, route handler, webhook, and AI tool call validates input with Zod. The app fails fast at boot if env vars are missing or malformed.
+7. **Prompts are code.** AI prompts live in TypeScript modules under `apps/web/src/ai/prompts/`, are version-controlled, and pin the model explicitly. They are not loaded from a CMS or a database at runtime.
+
+## Stack quick reference
+
+- **Language:** TypeScript (strict), Node.js 22 LTS.
+- **Framework:** Next.js 15 App Router + React 19.
+- **DB:** PostgreSQL 16 via Drizzle ORM.
+- **Auth:** Clerk (managed).
+- **Background jobs:** Inngest.
+- **LLM:** Anthropic Claude (Sonnet for routine, Opus for plan generation), behind an `AIProvider` interface.
+- **Validation:** Zod.
+- **Styling:** Tailwind CSS + shadcn/ui base.
+- **State:** TanStack Query (server) + Zustand (ephemeral UI).
+- **Tests:** Vitest (unit + engine fixtures) + Playwright (E2E).
+- **Package manager:** pnpm (workspace from day 1).
+
+## Environments
+
+Two env vars together describe deployment:
+
+- `NODE_ENV` — `development` | `test` | `production`. Standard Node convention; drives framework behavior.
+- `APP_ENV` — `dev` | `qa` | `prod`. Tempo-specific; drives our config selection (DB, keys, feature-flag defaults).
+
+QA runs `NODE_ENV=production` builds against non-prod backends. Don't conflate the two.
+
+Committed config (no secrets): `.env.development`, `.env.qa`, `.env.production`, `.env.example`.
+Gitignored secrets: `.env.local` for dev only. QA and prod read secrets from the deploy platform.
+
+`apps/web/src/env.ts` is the single Zod-validated env loader. Adding a new env variable requires updating both `env.ts` and `.env.example` in the same change.
+
+## Local development
+
+Postgres runs on **port 5433** (not 5432) to avoid conflicting with any Postgres already on the contributor's machine.
+
+```bash
+docker-compose up -d postgres   # start local DB
+pnpm install                    # install workspace deps
+pnpm db:migrate                 # apply Drizzle migrations
+pnpm db:seed                    # populate dev fixtures
+pnpm dev                        # Next.js dev server
+pnpm test                       # unit tests (Vitest)
+pnpm test:e2e                   # Playwright
+pnpm lint                       # ESLint
+pnpm typecheck                  # tsc --noEmit
+```
+
+Local connection string for dev: `postgres://tempo:tempo@localhost:5433/tempo_dev`.
+
+We do **not** mock Clerk, Anthropic, Inngest, or the calendar APIs locally — call the real sandboxes. Mocked external services drift from reality and hide bugs.
+
+## Repo structure
+
+```
+tempo/
+├── docker-compose.yml
+├── .env.example, .env.development, .env.qa, .env.production
+├── pnpm-workspace.yaml
+├── apps/
+│   └── web/
+│       ├── src/
+│       │   ├── app/         # Next.js App Router routes
+│       │   ├── components/  # React components
+│       │   ├── server/      # server actions, tRPC routers
+│       │   ├── engine/      # PURE — the constraint engine
+│       │   ├── ai/          # AIProvider interface + prompts
+│       │   ├── calendar/    # Google / Microsoft / iCal adapters
+│       │   ├── db/          # Drizzle schema + migrations
+│       │   ├── lib/         # shared utilities
+│       │   └── env.ts       # Zod-validated env loader
+│       └── tests/
+└── .cursor/rules/           # project rules (this file lives here)
+```
+
+The engine and domain types live under `apps/web/src/` for v1 and will move to `packages/engine` and `packages/domain` once a second surface (mobile) needs them. The pnpm workspace is in place from day 1 specifically so that move is mechanical.
+
+## Conventions
+
+- **Server actions over REST.** In-app calls use Next.js server actions or tRPC. REST is reserved for external webhooks and integrations.
+- **Domain types are shared.** Everything in `apps/web/src/domain/` (when extracted) and `apps/web/src/engine/types.ts` is consumed identically by client and server.
+- **Migrations are forward-only.** No destructive operations without an explicit comment explaining why and a rollback note in the PR description.
+- **Discriminator + JSONB for tasks.** The `tasks` table uses a `kind` column (`anchored` | `recurring` | `fluid`) plus type-specific JSONB. Avoid spawning per-kind tables.
+- **Engine fixtures double as tests and documentation.** New engine behavior lands with a JSON fixture (input plan + expected placements) under `apps/web/src/engine/__fixtures__/`.
+- **Every placement carries a reason.** The engine emits a human-readable explanation per placed block. The UI uses these for Explain-the-Plan; do not omit them.
+- **Feature flags via PostHog.** Risky surfaces (AI auto-edit, multi-anchor) gate behind flags that default off in dev/qa.
+
+## Things never to do
+
+- Never have the engine import from `db/`, `server/`, `app/`, or anything that does I/O.
+- Never let an LLM tool write directly to scheduled slots — go through the engine's simulator and return a diff.
+- Never auto-resolve a layer-precedence conflict silently. Surface it.
+- Never compress or drop fluid scope to mask an insufficient-time situation. Alert.
+- Never commit secrets. `.env.*.local` is the only acceptable location for them locally; deploy platforms own them in qa/prod.
+- Never use `--no-verify` to bypass hooks unless the user explicitly asks.
+- Never load prompts from a runtime source (CMS, DB). Prompts are TypeScript modules in source control.
+- Never destroy local data without confirmation. `docker-compose down -v` and `drizzle-kit drop` are user-confirmed actions.
+
+## Scoped rules
+
+Path-scoped rules live alongside this one in `.cursor/rules/` and auto-load when working in their target paths:
+
+- `engine-invariants.mdc` — `apps/web/src/engine/**` (purity, layer precedence, fixtures, performance).
+- `ai-invariants.mdc` — `apps/web/src/ai/**` (prompts as code, no direct writes, evals, telemetry).
+- `schema-invariants.mdc` — `apps/web/src/db/**` (forward-only migrations, FKs, indices, seed alignment).
+- `spec-consistency.mdc` — `PRD.md`, `TECHNICAL_DECISIONS.md`, `IMPLEMENTATION_PLAN.md` (keep code and docs aligned).

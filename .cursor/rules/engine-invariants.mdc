@@ -1,0 +1,44 @@
+---
+description: Invariants and guardrails for the Tempo constraint engine
+globs: apps/web/src/engine/**/*
+alwaysApply: false
+---
+
+# Engine invariants
+
+The engine is Tempo's defining moat: it computes placements for fluid tasks around anchored events and recurring cadence. Its correctness is non-negotiable. When changing anything under `apps/web/src/engine/`, every item below must hold.
+
+## Required reading
+
+- `PRD.md` §3 (Core Concepts), §4.5 (Liquid Distribution Engine), §4.4 (Fluid Content).
+- `TECHNICAL_DECISIONS.md` §3.1 (Why TypeScript end-to-end).
+- `IMPLEMENTATION_PLAN.md` §5 (M2 — The Engine), especially the demo criteria, performance budget, and risks.
+
+If a change refers to a behavior not in those docs, flag the doc gap.
+
+## Invariants
+
+1. **Purity.** Import nothing from `db/`, `server/`, `app/`, `calendar/`, or `ai/`. Do not import `fs`, `node:fs`, `process`, network clients, or Clerk. Never call `Date.now()`, `new Date()` without an argument, `Math.random()`, or any other source of nondeterminism — inject a clock and any randomness via parameters.
+2. **Layer precedence.** No code path may let a fluid placement land in a slot occupied by an anchored event, recurring instance, sleep window, or unavailability. Conflict resolution always favors the higher layer.
+3. **Non-destructive replan.** Output preserves user-marked progress, completion state, in-flight task notes, and any user-pinned placements. New placements are added; pinned ones are kept; only unpinned, uncompleted blocks may be moved.
+4. **Insufficient-time signaling.** When the engine cannot fit all units before the anchor (or two anchors compete for the same scarce window), return a structured shortfall (`{ kind: "insufficient_time", ... }`) rather than silently compressing or dropping work.
+5. **Per-placement reason.** Every emitted placement carries a `reason` string suitable for Explain-the-Plan. Producing placements without a reason is a defect.
+6. **Determinism.** Same input → same output. If the engine reads from the injected clock or randomness, the test fixture pins both.
+7. **Energy-profile honor.** When touching placement weighting, verify the four profiles (Sprint / Cool-down / Steady / Front-load) still produce visibly distinct distributions on a canonical fixture.
+8. **Earliest-start / latest-finish / dependencies.** When touching task ordering or fences, respect a topological order and honor per-task fences.
+
+## Test coverage
+
+- Every algorithmic change ships with at least one new or updated **fixture** under `apps/web/src/engine/__fixtures__/` — a JSON file with input plan + expected placements. Pure-text changes to algorithm code without a fixture update are a smell.
+- Existing fixtures keep passing; if any are modified, the change is justified (i.e., the prior expected output was wrong, not the new one).
+- Edge-case fixtures must cover: empty plan, single-day plan, anchor in the past, all-fluid plan, all-anchored plan, dependency cycles (graceful error), insufficient-time, multi-anchor competition.
+
+## Performance
+
+- Plan target: **p95 replan <500ms** for ~200 fluid units / 50 anchored events / 5 recurring rules.
+- A nested loop over fluid tasks × gap intervals × recurring instances needs a complexity comment or benchmark.
+- Widening the planning window beyond the v1 90-day cap requires explicit discussion.
+
+## Self-review before completing a change
+
+Walk the eight invariants above and confirm PASS / FAIL / N/A with file:line evidence. Confirm fixture coverage. Cite paths exactly. Do not speculate about code you have not read.
